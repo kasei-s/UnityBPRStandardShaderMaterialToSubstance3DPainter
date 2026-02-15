@@ -1,8 +1,12 @@
 # run_painter_job.py
-# Fixed16.10.0 - Stable project ensure + proven texture apply logic from Fixed16.7.4.
+# Fixed16.15.0 - Add Height (_ParallaxMap) texture export and apply support.
 #   - ChannelType alias resolution (BaseColor, AO->AmbientOcclusion, Roughness, Metallic, Emission->Emissive)
 #   - Resource -> ResourceID conversion with multi-step fallback (identifier(), constructors, factories)
 #   - Fill layer set_source(ChannelType, ResourceID) - correct argument order
+#   - [FIX] Auto-add AO/Emissive channels to TextureSet before texture apply (Channel N isn't valid fix)
+#   - [FIX] _wait_remote now logs retry progress every 10 seconds
+#   - [FIX] Detects already-running Painter to avoid port conflict
+#   - [FIX] Unhandled exceptions in main() logged to log file (not just stdout)
 # For Adobe Substance 3D Painter 11.0+ (Steam/Standalone) with --enable-remote-scripting
 #
 # Usage:
@@ -12,7 +16,7 @@
 #   job_runner.local.log
 #   painter_remote_apply.log
 #   painter_apply_<TextureSetName>_RAW.txt
-#   painter_apply_<TextureSetName>_Fixed16.10.0.json
+#   painter_apply_<TextureSetName>_Fixed16.15.0.json
 
 import json
 import os
@@ -23,7 +27,7 @@ import traceback
 
 import lib_remote
 
-VERSION = "Fixed16.10.0"
+VERSION = "Fixed16.15.0"
 
 def _clean(v):
     return (v or '').strip()
@@ -68,26 +72,59 @@ def _remote_exec_block(remote, block, label, local_log, timeout=1200):
             "error": str(e),
         }, ensure_ascii=False)
 
+def _is_painter_running():
+    """Check if Substance 3D Painter is already running (Windows)."""
+    try:
+        result = subprocess.run(
+            ['tasklist', '/FI', 'IMAGENAME eq Adobe Substance 3D Painter.exe', '/FO', 'CSV', '/NH'],
+            capture_output=True, text=True, timeout=10
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        for line in lines:
+            if 'Adobe Substance 3D Painter' in line:
+                return True
+    except Exception:
+        pass
+    return False
+
 def _wait_remote(remote, local_log, timeout_http=240, timeout_py=300):
+    _log(local_log, f'[remote] Waiting for Painter Remote Scripting (HTTP timeout={timeout_http}s, Python timeout={timeout_py}s)...')
     t0 = time.time()
+    attempt = 0
+    last_err = None
     while True:
+        attempt += 1
         try:
             remote.checkConnection()
-            _log(local_log, '[remote] HTTP connected')
+            elapsed = time.time() - t0
+            _log(local_log, f'[remote] HTTP connected (after {elapsed:.1f}s, {attempt} attempts)')
             break
         except Exception as e:
-            if time.time() - t0 > timeout_http:
-                raise RuntimeError(f'Remote HTTP timeout: {e}')
+            last_err = e
+            elapsed = time.time() - t0
+            if elapsed > timeout_http:
+                _log(local_log, f'[remote] HTTP TIMEOUT after {elapsed:.1f}s ({attempt} attempts): {e}')
+                raise RuntimeError(f'Remote HTTP timeout after {elapsed:.1f}s: {e}')
+            # Log progress every 10 seconds
+            if attempt == 1 or attempt % 10 == 0:
+                _log(local_log, f'[remote] HTTP retry #{attempt} ({elapsed:.0f}s elapsed): {type(e).__name__}: {e}')
             time.sleep(1)
     t0 = time.time()
+    attempt = 0
     while True:
+        attempt += 1
         try:
             remote.execScript('1+1', 'python', timeout=15)
-            _log(local_log, '[remote] Python ready')
+            elapsed = time.time() - t0
+            _log(local_log, f'[remote] Python ready (after {elapsed:.1f}s, {attempt} attempts)')
             break
         except Exception as e:
-            if time.time() - t0 > timeout_py:
-                raise RuntimeError(f'Remote Python timeout: {e}')
+            elapsed = time.time() - t0
+            if elapsed > timeout_py:
+                _log(local_log, f'[remote] Python TIMEOUT after {elapsed:.1f}s ({attempt} attempts): {e}')
+                raise RuntimeError(f'Remote Python timeout after {elapsed:.1f}s: {e}')
+            if attempt == 1 or attempt % 10 == 0:
+                _log(local_log, f'[remote] Python retry #{attempt} ({elapsed:.0f}s elapsed): {type(e).__name__}: {e}')
             time.sleep(1)
 
 def _start_painter(exe_path, spp_path, local_log):
@@ -397,6 +434,9 @@ else:
 
             def pick_channel(key):
                 k = (key or "").lower()
+                # Skip combined textures that should not map to a single channel
+                if "metallicsmoothness" in k or "metallicgloss" in k:
+                    return None
                 # prefer exact matches first
                 for cand in (k, k.replace(" ", ""), k.replace("_","")):
                     if cand in lower_to_member:
@@ -426,6 +466,10 @@ else:
                     for cand in ("emissive","emission","emis"):
                         if cand in lower_to_member:
                             return getattr(CT, lower_to_member[cand])
+                if "height" in k or "parallax" in k or "displacement" in k:
+                    for cand in ("height","displacement","parallax"):
+                        if cand in lower_to_member:
+                            return getattr(CT, lower_to_member[cand])
                 return None
 
             for k in KEY_TO_PATH.keys():
@@ -434,6 +478,129 @@ else:
                     OUT_OBJ["channeltype_map"][k] = str(ch) if ch is not None else None
                 except Exception as e:
                     OUT_OBJ["channeltype_map"][k] = "ERR:" + str(e)
+
+            # --- ensure required channels exist on TextureSet ---
+            # add_channel() does NOT exist on TextureSet in SDK 0.3.4.
+            # We must discover the correct API: it might be on Stack, or a
+            # module-level function.
+            OUT_OBJ["channels_added"] = []
+            OUT_OBJ["existing_channels"] = []
+
+            # --- DISCOVERY: enumerate all public methods on key objects ---
+            # This helps us find the actual add_channel API location
+            OUT_OBJ["_diag_ts_dir"] = sorted([m for m in dir(ts) if not m.startswith("_")]) if ts is not None else []
+            OUT_OBJ["_diag_stack_dir"] = sorted([m for m in dir(stack) if not m.startswith("_")]) if stack is not None else []
+            OUT_OBJ["_diag_textureset_module_dir"] = sorted([m for m in dir(textureset) if not m.startswith("_")])
+
+            # Try to list existing channels via various APIs
+            if ts is not None:
+                for _ch_method in ("all_channels", "get_channels", "channels"):
+                    try:
+                        _fn = getattr(ts, _ch_method, None)
+                        if _fn is not None:
+                            _existing = _fn() if callable(_fn) else _fn
+                            OUT_OBJ["existing_channels"] = [str(c) for c in _existing]
+                            OUT_OBJ["existing_channels_via"] = "ts." + _ch_method
+                            break
+                    except Exception as _ec:
+                        OUT_OBJ["existing_channels_err_" + _ch_method] = str(_ec)
+            if stack is not None and not OUT_OBJ["existing_channels"]:
+                for _ch_method in ("all_channels", "get_channels", "channels"):
+                    try:
+                        _fn = getattr(stack, _ch_method, None)
+                        if _fn is not None:
+                            _existing = _fn() if callable(_fn) else _fn
+                            OUT_OBJ["existing_channels"] = [str(c) for c in _existing]
+                            OUT_OBJ["existing_channels_via"] = "stack." + _ch_method
+                            break
+                    except Exception as _ec:
+                        OUT_OBJ["existing_channels_err_stack_" + _ch_method] = str(_ec)
+
+            # --- Try to add channels using every possible API location ---
+            if CT is not None:
+                def _pick_formats(channel):
+                    ch_name = str(channel).lower()
+                    CF = getattr(textureset, "ChannelFormat", None)
+                    fmts = []
+                    if CF is not None:
+                        if any(w in ch_name for w in ("ao", "occlusion", "metallic", "roughness", "height", "glossi")):
+                            for attr in ("L8", "L16", "L32F"):
+                                if hasattr(CF, attr):
+                                    fmts.append(("ChannelFormat." + attr, getattr(CF, attr)))
+                        if any(w in ch_name for w in ("emissive", "emission", "basecolor", "base_color", "diffuse", "normal")):
+                            for attr in ("sRGB8", "RGB8", "RGB16", "RGB32F"):
+                                if hasattr(CF, attr):
+                                    fmts.append(("ChannelFormat." + attr, getattr(CF, attr)))
+                        if not fmts:
+                            for attr in ("L8", "sRGB8", "RGB8"):
+                                if hasattr(CF, attr):
+                                    fmts.append(("ChannelFormat." + attr, getattr(CF, attr)))
+                    fmts.append(("no_format", None))
+                    return fmts
+
+                # Build list of (label, callable) for add_channel attempts
+                def _build_add_attempts(ch, fmt_val, fmt_label):
+                    attempts = []
+                    # 1. stack.add_channel(ch, fmt)
+                    if stack is not None and hasattr(stack, "add_channel"):
+                        if fmt_val is not None:
+                            attempts.append(("stack.add_channel(ch," + fmt_label + ")",
+                                             lambda _s=stack,_c=ch,_f=fmt_val: _s.add_channel(_c, _f)))
+                        attempts.append(("stack.add_channel(ch)",
+                                         lambda _s=stack,_c=ch: _s.add_channel(_c)))
+                    # 2. ts.add_channel(ch, fmt)
+                    if ts is not None and hasattr(ts, "add_channel"):
+                        if fmt_val is not None:
+                            attempts.append(("ts.add_channel(ch," + fmt_label + ")",
+                                             lambda _t=ts,_c=ch,_f=fmt_val: _t.add_channel(_c, _f)))
+                        attempts.append(("ts.add_channel(ch)",
+                                         lambda _t=ts,_c=ch: _t.add_channel(_c)))
+                    # 3. Module-level: textureset.add_channel(ts, ch, fmt), textureset.add_channel(stack, ch, fmt)
+                    if hasattr(textureset, "add_channel"):
+                        if fmt_val is not None:
+                            attempts.append(("textureset.add_channel(ts,ch," + fmt_label + ")",
+                                             lambda _c=ch,_f=fmt_val: textureset.add_channel(ts, _c, _f)))
+                            attempts.append(("textureset.add_channel(stack,ch," + fmt_label + ")",
+                                             lambda _c=ch,_f=fmt_val: textureset.add_channel(stack, _c, _f)))
+                        attempts.append(("textureset.add_channel(ts,ch)",
+                                         lambda _c=ch: textureset.add_channel(ts, _c)))
+                    # 4. Stack.edit_channel_list / set_channels
+                    if stack is not None:
+                        for mname in ("edit_channel_list", "set_channels"):
+                            if hasattr(stack, mname):
+                                attempts.append(("stack." + mname,
+                                                 lambda _s=stack,_m=mname,_c=ch: getattr(_s, _m)(_c)))
+                    return attempts
+
+                for k in KEY_TO_PATH.keys():
+                    ch = pick_channel(k)
+                    if ch is None:
+                        continue
+                    added = False
+                    add_err = None
+                    all_tried = []
+                    for fmt_label, fmt_val in _pick_formats(ch):
+                        for try_label, try_fn in _build_add_attempts(ch, fmt_val, fmt_label):
+                            try:
+                                try_fn()
+                                added = True
+                                OUT_OBJ["channels_added"].append({"key": k, "channel": str(ch), "via": try_label, "ok": True})
+                                break
+                            except Exception as e:
+                                es = str(e).lower()
+                                if any(w in es for w in ("already", "exist", "present", "duplicate")):
+                                    added = True
+                                    OUT_OBJ["channels_added"].append({"key": k, "channel": str(ch), "via": "already_exists(" + try_label + ")", "ok": True, "detail": str(e)})
+                                    break
+                                add_err = str(e)
+                                all_tried.append({"via": try_label, "err": str(e)})
+                                continue
+                        if added:
+                            break
+
+                    if not added:
+                        OUT_OBJ["channels_added"].append({"key": k, "channel": str(ch), "via": "all_failed", "ok": False, "err": add_err or "unknown", "tried": all_tried})
+                        OUT_OBJ["attempts"].append({"step": "add_channel_" + k, "ok": False, "err": add_err or "unknown"})
 
             # --- create insert position + fill ---
             pos = None
@@ -674,7 +841,14 @@ def main():
     _append(apply_log, f'MeshPath={mesh_path}')
     _append(apply_log, f'saveDelaySec={save_delay}')
     _append(apply_log, f'reopenDelaySec={reopen_delay}')
-    _start_painter(painter_exe, out_spp, local_log)
+    # Check if Painter is already running (port conflict prevention)
+    already_running = _is_painter_running()
+    if already_running:
+        _log(local_log, '[WARN] Painter is already running! Trying to connect to existing instance...')
+        _log(local_log, '[WARN] If connection fails, close all Painter instances and retry.')
+        _append(apply_log, '[WARN] Painter already running - using existing instance')
+    else:
+        _start_painter(painter_exe, out_spp, local_log)
     remote = lib_remote.RemotePainter()
     _wait_remote(remote, local_log)
     _append(apply_log, 'Ensuring project open/create/save_as (remote)...')
@@ -788,7 +962,25 @@ else:
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
+    except SystemExit:
+        raise
     except Exception as e:
-        print('FATAL:', e, flush=True)
+        # Log fatal errors to the export folder log file as well as stdout
+        print(f'FATAL: {e}', flush=True)
         traceback.print_exc()
+        # Try to write error to log file if possible
+        try:
+            if len(sys.argv) >= 2:
+                job_json = os.path.abspath(sys.argv[1])
+                with open(job_json, 'r', encoding='utf-8-sig') as f:
+                    job = json.load(f)
+                ef = (job.get('exportFolder') or '').strip()
+                if ef:
+                    os.makedirs(ef, exist_ok=True)
+                    err_log = os.path.join(ef, 'job_runner.local.log')
+                    with open(err_log, 'a', encoding='utf-8', errors='replace') as f:
+                        f.write(f'[FATAL] {e}\n')
+                        f.write(traceback.format_exc() + '\n')
+        except Exception:
+            pass
         raise

@@ -48,6 +48,7 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
     bool exportNormal = true;
     bool exportAO = true;
     bool exportEmission = true;
+    bool exportHeight = true;
     bool generateMetallic = true;
     bool generateRoughnessFromSmoothness = true;
 
@@ -142,6 +143,7 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
             exportNormal = EditorGUILayout.ToggleLeft("Export Normal (_BumpMap)", exportNormal);
             exportAO = EditorGUILayout.ToggleLeft("Export AO (_OcclusionMap)", exportAO);
             exportEmission = EditorGUILayout.ToggleLeft("Export Emission (_EmissionMap)", exportEmission);
+            exportHeight = EditorGUILayout.ToggleLeft("Export Height (_ParallaxMap)", exportHeight);
             generateMetallic = EditorGUILayout.ToggleLeft("Generate Metallic (MetallicSmoothness.R)", generateMetallic);
             generateRoughnessFromSmoothness = EditorGUILayout.ToggleLeft("Generate Roughness = 1 - Smoothness(Alpha)", generateRoughnessFromSmoothness);
         }
@@ -349,6 +351,7 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
     const string OCCLUSION = "_OcclusionMap";
     const string METALLIC_GLOSS = "_MetallicGlossMap";
     const string EMISSION = "_EmissionMap";
+    const string PARALLAX_MAP = "_ParallaxMap";
 
     Dictionary<string, string> ExportFromStandardMaterial(Material mat, string texSetName, string outDir)
     {
@@ -359,20 +362,48 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
         Texture2D? ao = GetTex(mat, OCCLUSION);
         Texture2D? metSm = GetTex(mat, METALLIC_GLOSS);
         Texture2D? emis = GetTex(mat, EMISSION);
+        Texture2D? heightTex = GetTex(mat, PARALLAX_MAP);
+
+        // デバッグ: 各テクスチャの取得状況をログ出力
+        UnityEngine.Debug.Log($"[SP] Texture check: albedo={albedo != null}, normal={normal != null}, ao={ao != null}, metSm={metSm != null}, emis={emis != null}, heightTex={heightTex != null} (HasProperty={mat.HasProperty(PARALLAX_MAP)})");
 
         if (exportBaseColor && albedo) map["BaseColor"] = BakeToPng(albedo, Path.Combine(outDir, $"{texSetName}_BaseColor.png"));
         if (exportNormal && normal) map["Normal"] = BakeNormalToPng(normal, Path.Combine(outDir, $"{texSetName}_Normal.png"));
         if (exportAO && ao) map["AO"] = BakeToPng(ao, Path.Combine(outDir, $"{texSetName}_AO.png"));
         if (exportEmission && emis) map["Emission"] = BakeToPng(emis, Path.Combine(outDir, $"{texSetName}_Emission.png"));
+        if (exportHeight)
+        {
+            if (heightTex)
+            {
+                map["Height"] = BakeToPng(heightTex, Path.Combine(outDir, $"{texSetName}_Height.png"));
+                UnityEngine.Debug.Log($"[SP] Height texture exported from _ParallaxMap: {heightTex.name} ({heightTex.width}x{heightTex.height})");
+            }
+            else
+            {
+                // _ParallaxMap テクスチャが無い場合、
+                // Substance Painter の Height チャンネル用に中間グレー（0.5 = ニュートラル）を生成する。
+                // _Parallax はスケール値（通常 0.02）なので、テクスチャが無い場合は変位なし。
+                float heightVal = 0.5f; // ニュートラル（変位なし）
+                var heightSolid = CreateSolidTexture(256, 256, heightVal);
+                var path = Path.Combine(outDir, $"{texSetName}_Height.png");
+                File.WriteAllBytes(path, heightSolid.EncodeToPNG());
+                map["Height"] = path;
+                DestroyImmediateSafe(heightSolid);
+                UnityEngine.Debug.Log($"[SP] Generated neutral Height texture (0.5 gray) — no _ParallaxMap found");
+            }
+        }
 
         if (metSm)
         {
-            map["MetallicSmoothness"] = BakeToPng(metSm, Path.Combine(outDir, $"{texSetName}_MetallicSmoothness.png"));
+            // MetallicSmoothness 合成テクスチャはデバッグ用に保存するが、
+            // Painter の job には含めない（分解した Metallic / Roughness を使用する）
+            BakeToPng(metSm, Path.Combine(outDir, $"{texSetName}_MetallicSmoothness.png"));
 
             var readable = GetReadableCopy(metSm);
 
             if (generateMetallic)
             {
+                // MetallicGlossMap の R チャンネル = Metallic
                 var metallic = ExtractChannel(readable, Channel.R);
                 var path = Path.Combine(outDir, $"{texSetName}_Metallic.png");
                 File.WriteAllBytes(path, metallic.EncodeToPNG());
@@ -382,6 +413,7 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
 
             if (generateRoughnessFromSmoothness)
             {
+                // MetallicGlossMap の A チャンネル = Smoothness → 反転して Roughness
                 var smooth = ExtractChannel(readable, Channel.A);
                 var rough = InvertGrayscale(smooth);
                 var path = Path.Combine(outDir, $"{texSetName}_Roughness.png");
@@ -392,6 +424,33 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
             }
 
             DestroyImmediateSafe(readable);
+        }
+        else
+        {
+            // MetallicGlossMap テクスチャが無い場合、
+            // マテリアルのスカラー値から単色テクスチャを生成する
+            if (generateMetallic && mat.HasProperty("_Metallic"))
+            {
+                float metallicVal = mat.GetFloat("_Metallic");
+                var metallic = CreateSolidTexture(256, 256, metallicVal);
+                var path = Path.Combine(outDir, $"{texSetName}_Metallic.png");
+                File.WriteAllBytes(path, metallic.EncodeToPNG());
+                map["Metallic"] = path;
+                DestroyImmediateSafe(metallic);
+                UnityEngine.Debug.Log($"[SP] Generated Metallic from scalar value: {metallicVal}");
+            }
+
+            if (generateRoughnessFromSmoothness && mat.HasProperty("_Glossiness"))
+            {
+                float smoothness = mat.GetFloat("_Glossiness");
+                float roughness = 1f - smoothness;
+                var rough = CreateSolidTexture(256, 256, roughness);
+                var path = Path.Combine(outDir, $"{texSetName}_Roughness.png");
+                File.WriteAllBytes(path, rough.EncodeToPNG());
+                map["Roughness"] = path;
+                DestroyImmediateSafe(rough);
+                UnityEngine.Debug.Log($"[SP] Generated Roughness from scalar Smoothness={smoothness} → Roughness={roughness}");
+            }
         }
 
         return map;
@@ -553,6 +612,22 @@ public class SubstancePainterObjectExporterWindow : EditorWindow
         dst.SetPixels32(px);
         dst.Apply(false, false);
         return dst;
+    }
+
+    /// <summary>
+    /// 指定した値（0〜1）で塗りつぶした単色グレースケールテクスチャを生成する。
+    /// MetallicGlossMap が無い場合にスカラー値から Metallic / Roughness を作るために使用。
+    /// </summary>
+    static Texture2D CreateSolidTexture(int width, int height, float value01)
+    {
+        byte v = (byte)Mathf.RoundToInt(Mathf.Clamp01(value01) * 255f);
+        var tex = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
+        var px = new Color32[width * height];
+        for (int i = 0; i < px.Length; i++)
+            px[i] = new Color32(v, v, v, 255);
+        tex.SetPixels32(px);
+        tex.Apply(false, false);
+        return tex;
     }
 
     static void DestroyImmediateSafe(UnityEngine.Object? o)

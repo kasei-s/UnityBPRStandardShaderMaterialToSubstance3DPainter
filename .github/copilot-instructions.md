@@ -135,6 +135,10 @@ Smoothness (A)|Roughness（反転）
 Occlusion|Ambient Occlusion
 Emission|Emissive
 
+* [UnityのetallicとSmoothnessのチャンネル配置]
+MetallicはMetallicに適用したテクスチャのRGBAのRの値が、SmoothnessはRGBAのAの値(アルファチャンネル)が使われる。  
+また、UnityのSmoothnessで使うAlphaの値は「Albedo Alpha」と「Metallic Alpha」の2種類から指定でき、AlbedoまたはMetallicにあてがわれたテクスチャのうち、選んだ方のアルファチャンネルが参照される。  
+
 * [Smoothness → Roughness の変換（最重要）]
 Substance 3D Painter は Roughness、Unity Standard は Smoothness。  
 下記数式の通り行うには、Unity で一度 RenderTexture に焼いて反転が必要。  
@@ -206,3 +210,6 @@ Emission
  - [Unity C# Script API Reference](https://docs.unity3d.com/6000.3/Documentation/ScriptReference/index.html)
  - [Substance 3D Painter Python API Reference](https://helpx.adobe.com/substance-3d-painter-python/api.html)
  - [Substance 3D Painter GitHub Pages](https://adobedocs.github.io/painter-python-api/)
+ - [Unity - Manual: Metallic mode: Metallic Parameter](https://docs.unity3d.com/Manual/StandardShaderMaterialParameterMetallic.html)
+ - [Smoothness - Unity マニュアル](https://docs.unity3d.com/ja/2017.4/Manual/StandardShaderMaterialParameterSmoothness.html)
+ - [シェーディング - Unity マニュアル](https://docs.unity3d.com/ja/2017.4/Manual/BestPracticeMakingBelievableVisuals5.html)

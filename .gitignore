@@ -1,0 +1,58 @@
+# --- 環境・ツール系 ---
+# IDE/エディタの設定ファイル (VS Code, IntelliJなど)
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+
+# OS依存ファイル (Mac)
+.DS_Store
+Thumbs.db
+
+# --- 環境変数・機密情報 ---
+# APIキーやパスワードが入ったファイル
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# ビルドされたファイル (言語による)
+dist/
+build/
+*.out
+*.exe
+
+# バックアップファイル
+*_Fixed*.bat
+*_Fixed*.py
+
+
+#実行ログは、参照用なのでアップしない
+/実行ログ/
+*/sample/
+*/backup/
+/sample/
+/backup/
+backup/
+sample/
+
+#Substance3DPainterLogログは、参照用なのでアップしない
+/Substance3DPainterLog/
+
+#チャット履歴
+/vs_code_chat内容.md
+
+# --- その他 ---
+# ログファイル
+*.log
+# Temp
+temp/
+tmp/

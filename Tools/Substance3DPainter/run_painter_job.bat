@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-rem === run_painter_job.bat (Fixed16.9.0) ===
+rem === run_painter_job.bat (Fixed16.15.0) ===
 rem Usage:
 rem   run_painter_job.bat "C:\path\to\job.json"
 rem If no argument is given, job.json next to this bat is used.
@@ -15,7 +15,7 @@ if "%~1"=="" (
   set "JOB_JSON=%~1"
 )
 
-echo === run_painter_job.bat (Fixed16.9.0) ===
+echo === run_painter_job.bat (Fixed16.15.0) ===
 echo PY_FILE="%PY_FILE%"
 echo JOB_JSON="%JOB_JSON%"
 echo.
