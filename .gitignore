@@ -39,10 +39,13 @@ build/
 /実行ログ/
 */sample/
 */backup/
+*/release/
 /sample/
 /backup/
+/release/
 backup/
 sample/
+release/
 
 #Substance3DPainterLogログは、参照用なのでアップしない
 /Substance3DPainterLog/
