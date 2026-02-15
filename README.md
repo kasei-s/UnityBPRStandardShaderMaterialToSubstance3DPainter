@@ -1,4 +1,4 @@
-# Unity ⇄ Substance 3D Painter Bridge (BIRP/Standard向け)
+# Unity → Substance 3D Painter Bridge (BIRP/Standard向け)
 
 ※AI生成を使用してこのプロジェクトは作成されています。  
 このパッケージは、Unity Editor拡張から以下を自動化します。
